@@ -1,0 +1,299 @@
+;----------------------------------------------------------------------
+; File: Keypad.asm
+; Author: Gilbert Arbez
+
+; Description:
+;  This contains the code for reading the
+;  16-key keypad attached to Port A
+;  See the schematic of the connection in the
+;  design document.
+;
+;  The following subroutines are provided by the module
+;
+; ch <- pollReadKey: to poll keypad for a keypress
+;                 Checks keypad for 2 ms for a keypress, and
+;                 returns NOKEY if no keypress is found, otherwise
+;                 the value returned will correspond to the
+;                 ASCII code for the key, i.e. 0-9, *, # and A-D
+; initkey: Initialises Port A for the keypad
+;
+; ch <- readKey: to read the key on the keypad
+;                 The value returned will correspond to the
+;                 ASCII code for the key, i.e. 0-9, *, # and A-D
+;---------------------------------------------------------------------
+
+; Include header files
+
+; Define External Symbols
+ XDEF initKeyPad, pollReadKey, readKey
+
+; External Symbols Referenced
+ XREF delayms
+ 
+**************EQUATES**********
+
+
+; codes for scanning keyboard
+
+ROW0 EQU %11100000
+ROW1 EQU %11010000
+ROW2 EQU %10110000
+ROW3 EQU %01110000
+
+;-----Conversion table
+NUMKEYS	EQU	16	; Number of keys on the keypad
+BADCODE 	EQU	$FF 	; returned of translation is unsuccessful
+NOKEY		EQU 	$00   ; No key pressed during poll period
+POLLCOUNT	EQU	1     ; Number of loops to create delay during polling
+
+.rodata SECTION
+
+; defnitions for structure cnvTbl_struct
+ OFFSET 0
+cnvTbl_code ds.b 1
+cnvTbl_ascii  ds.b 1
+cnvTbl_struct_len EQU *
+
+; Conversion Table
+cnvTbl  dc.b %11101110,'1'
+	dc.b %11101101,'2'
+	dc.b %11101011,'3'
+	dc.b %11100111,'a'
+	dc.b %11011110,'4'
+	dc.b %11011101,'5'
+	dc.b %11011011,'6'
+	dc.b %11010111,'b'
+	dc.b %10111110,'7'
+	dc.b %10111101,'8'
+	dc.b %10111011,'9'
+	dc.b %10110111,'c'
+	dc.b %01111110,'*'
+	dc.b %01111101,'0'
+	dc.b %01111011,'#'
+	dc.b %01110111,'d'
+
+.text SECTION ; place in code section
+;-----------------------------------------------------------	
+; Subroutine: initKeyPad
+;
+; Description: 
+; 	Initiliases PORT A
+; 	Bits 0-3 as inputs
+; 	Bits 4-7 as ouputs
+; 	Enable pullups 
+;-----------------------------------------------------------	
+initKeyPad:
+	movb #%11110000,DDRA ; Data Direction Register
+	bset PUCR,%00000001 ; Enable pullups
+	rts
+
+;-----------------------------------------------------------    
+; Subroutine: ch <- pollReadKey
+; Parameters: none
+; Local variable: code - in accumulator B
+;    ch - in accumulator B - char returned
+;    count - index reg X - count to create
+;                          delay
+; Returns
+;       ch: NOKEY when no key pressed,
+;       otherwise, ASCII Code in accumulator B
+
+; Description:
+;  Loops for a period of 2ms, checking to see if
+;  key is pressed. Calls readKey to read key if keypress 
+;  detected (and debounced) on Port A.
+;  When no key pressed, loop takes 11 cycles.
+;       1 loop takes 11 X 41 2/3 nano-seconds = 458 1/3 ns
+;       1 ms delay requires 2182 loops - set to POLLCOUNT
+;-----------------------------------------------------------
+; Stack Usage
+	OFFSET 0  ; to setup offset into stack
+PRK_CH         DS.B 1 ; return value, ASCII code
+PRK_VARSIZE
+PRK_PR_X	      DS.W 1 ; preserve X
+PRK_RA         DS.W 1 ; return address 
+
+pollReadKey: pshx   ; preserve register
+   leas -PRK_VARSIZE,SP
+   movb #NOKEY,PRK_CH,SP ; char ch = NOKEY;
+   ldx #POLLCOUNT   ; int count = POLLCOUNT;
+   movb #$0f,PORTA ; PORTA = 0x0f; //set outputs to low
+prk_loop:
+prk_if1:
+   ldab PORTA        ; 3 cycles  if(PORTA != 0x0f)
+   cmpb #$0f         ; 1 cycle   {
+   beq prk_endif1    ; 3 cycles
+   ldd #1            ;              delayms(1)
+   jsr delayms       ;              
+prk_if2:             ;              if(PORTA
+   ldab PORTA        ;              if(PORTA != 0x0f)
+   cmpb #$0f         ;              {
+   beq prk_endif2
+   jsr readKey       ;                  ch = readKey();
+   stab PRK_CH,SP    ;
+   bra prk_endloop   ;                  break
+prk_endif2:          ;              }
+prk_endif1:          ;           }
+   dex               ; 1 cycle   count--;
+   bne prk_loop      ; 3 cycles
+prk_endloop: 
+   ldab PRK_CH,SP    ; return(ch);
+   ; Restore stack and registers
+   leas PRK_VARSIZE,SP
+   pulx
+   rts
+
+;-----------------------------------------------------------	
+; Subroutine: ch <- readKey
+; Arguments: none
+; Local variable: code - in accumulator B
+; Returns
+;	ch - ASCII Code in accumulator B
+
+; Description:
+;  Main subroutine that reads a code from the
+;  keyboard using the subroutine readKeybrd.  The
+;  code is then translated with the subroutine
+;  translate to get the corresponding ASCII code.
+;-----------------------------------------------------------	
+readKey:			; do {
+     jsr readKeyCode	;      code = readKeyCode();
+
+     ; ready to translate
+     jsr translate	;       ch = translate(code);
+     ;cmpb #BADCODE	; } while(ch == BADCODE);
+     ;beq readKey	; 
+     rts			; return(ch);
+
+
+;-----------------------------------------------------------	
+; Subroutine: key <- readKeyCode
+; Arguments: none
+; Local variables:  key: On stack, used to manipulate values from Port A
+; Returns: key - in Accumulator B - code corresponding to key pressed
+
+; Description: Keep scanning the keyboard until the key is pressed.  If
+; key is pressed, then debounce the key.  Wait until key is released 
+; and debounced before returning the key.
+;-----------------------------------------------------------	
+; Stack Usage
+	OFFSET 0  ; to setup offset into stack
+RKY_KEY         DS.B 1 ; return value, ASCII code
+RKY_VARSIZE
+RKY_PR_A	      DS.W 1 ; preserve A
+RKY_RA         DS.W 1 ; return address
+ 
+readKeyCode: psha		; preserve A
+	leas -RKY_VARSIZE,SP
+rky_loop1:                 ; do {
+rky_loop2:		             ;    while(1) {
+	movb #ROW0,PORTA         ; 	PORTA = ROW1;
+	ldaa PORTA	             ;        if(
+	tab	   	                 ; 
+	comb		                 ; 	    ~PORTA
+	bitb #%00001111          ;                   & 0x0F )
+	bne  rky_endloop2        ;	break; 
+
+	movb #ROW1,PORTA         ; scan row1
+	ldaa PORTA
+	tab		
+	comb		
+	bitb #%00001111 
+	bne  rky_endloop2	
+
+	movb #ROW2,PORTA         ; scan row2
+	ldaa PORTA
+	tab		
+	comb		
+	bitb #%00001111 
+	bne  rky_endloop2
+
+	movb #ROW3,PORTA         ; scan row3
+	ldaa PORTA
+	tab			
+	comb			
+	bitb #%00001111 
+  bne rky_endloop2
+	bra rky_loop2
+rky_endloop2:         	   ;    }
+         staa RKY_KEY,SP   ; key = PORTA;
+         ldd #10           ;     delayms(10);
+	jsr delayms
+         ldaa RKY_KEY,SP;
+	cmpa PORTA	             ; } while(key != PORTA);
+	bne rky_loop1
+rky_endloop1: 
+	tab		                   ; put return code into acc B
+
+rky_loop3:
+	ldaa PORTA	             ; while(PORTA&0x0F != 0x0F) /*wait*/;
+	ANDA #%00001111
+	CMPA #%00001111   
+	BNE rky_loop3
+rky_endloop3:	 
+	ldd #10                  ; delayms(10);  // debounce lagging edge
+	jsr delayms
+	
+	ldaa PORTA	             ; while(PORTA&0x0F != 0x0F) /*wait*/;
+	ANDA #%00001111
+	CMPA #%00001111   
+	BNE rky_loop3
+
+  ldab RKY_KEY,SP          ; return(key);
+                           ; restore stack and registers
+  leas RKY_VARSIZE,SP
+	pula	                   ; restore A
+	rts
+	      
+;-----------------------------------------------------------	
+; Subroutine:  ch <- translate(code)
+; Arguments
+;	code - in Acc B - code read from keypad port
+; Returns
+;	ch - saved on stack but returned in Acc B - ASCII code
+; Local Variables
+;    	ptr - in register X - pointer to the table
+;	count - counter for loop in accumulator A
+; Description:
+;   Translates the code by using the conversion table
+;   searching for the code.  If not found, then BADCODE
+;   is returned.
+;-----------------------------------------------------------	
+; Stack Usage:
+   OFFSET 0
+TR_CH DS.B 1  ; for ch 
+TR_PR_A DS.B 1 ; preserved regiters A
+TR_PR_X DS.B 1 ; preserved regiters X
+TR_RA DS.W 1 ; return address
+
+translate: psha
+	pshx	; preserve registers
+	leas -1,SP 		    ; byte chascii;
+	ldx #cnvTbl		    ; ptr = cnvTbl;
+	clra			    ; ix = 0;
+	movb #BADCODE,TR_CH,SP ; ch = BADCODE;
+
+TR_loop 			    ; do {
+
+	; IF code = [ptr]
+	cmpb cnvTbl_code,X  	    ;     if(code == ptr->code)
+	bne TR_endif
+				    ;     {
+	movb cnvTbl_ascii,X,TR_CH,SP ;        ch <- [ptr+1]
+	bra TR_endwh  		    ;         break;
+TR_endif  			    ;     }
+				    ;     else {	
+	leax cnvTbl_struct_len,X    ;           ptr++;
+	inca ; increment count      ;           ix++;
+                                    ;     }	
+	cmpa #NUMKEYS               ;} WHILE count < NUMKEYS
+	blo TR_loop	
+TR_endwh ; ENDWHILE
+
+	pulb ; move ch to Acc B
+	; restore registres
+	pulx
+	pula
+	rts
+
+

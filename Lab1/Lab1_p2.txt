@@ -1,0 +1,12 @@
+>g $0400
+CEG3136 Alarm
+c-Config a-Arm
+Master code
+a:mstr 1-4:other
+Code or 'd'
+CEG3136 Alarm
+c-Config a-Arm
+Code
+*** Arming ***
+*** Armed ***
+-- Disarming --
